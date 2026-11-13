@@ -24,6 +24,10 @@ python3 scripts/hub.py caps
 
 `check` 는 전부 ✔ 여야 한다. `caps` 는 설치된 스킬·플러그인·MCP 를 모아 `capabilities.auto.json` 에 저장하고 push 한다.
 
+## 폰(SSH)에서 짧게
+
+`cd ~/agent-hub && ./h s` (목록) · `./h r T-002` (실행) · `./h v T-002` (작업 파일) · `./h l T-002` (로그) · `./h` (도움말)
+
 ## 매일 쓰는 명령 (모두 ~/agent-hub 에서)
 
 | 하고 싶은 것 | 명령 |
