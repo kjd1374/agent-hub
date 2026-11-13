@@ -1,0 +1,72 @@
+{
+  "collected_at": "2026-11-13 23:08",
+  "host": "Jungui-Macmini.local",
+  "claude": {
+    "version": "2.1.286 (Claude Code)",
+    "skills": [
+      "docs",
+      "docx",
+      "google-workspace",
+      "import-memory",
+      "morning",
+      "openrig-skills",
+      "pdf",
+      "pptx",
+      "refocusing",
+      "rigs",
+      "skill-creator",
+      "synced",
+      "xlsx"
+    ],
+    "plugins_raw": [
+      "No plugins installed. Use `claude plugin install` to install a plugin."
+    ],
+    "mcp": [],
+    "names": [
+      "docs",
+      "docx",
+      "google-workspace",
+      "import-memory",
+      "morning",
+      "openrig-skills",
+      "pdf",
+      "pptx",
+      "refocusing",
+      "rigs",
+      "skill-creator",
+      "synced",
+      "xlsx"
+    ]
+  },
+  "codex": {
+    "version": "codex-cli 0.162.0",
+    "skills": [
+      ".system",
+      "imagegen",
+      "openai-docs",
+      "review-agent",
+      "skill-creator",
+      "skill-installer"
+    ],
+    "mcp_enabled": [
+      "context7",
+      "cua_repl",
+      "exa",
+      "node_repl"
+    ],
+    "model": "gpt-6-astra",
+    "model_reasoning_effort": "xhigh",
+    "names": [
+      ".system",
+      "context7",
+      "cua_repl",
+      "exa",
+      "imagegen",
+      "node_repl",
+      "openai-docs",
+      "review-agent",
+      "skill-creator",
+      "skill-installer"
+    ]
+  }
+}
