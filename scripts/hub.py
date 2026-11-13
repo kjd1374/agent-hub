@@ -240,7 +240,7 @@ def _skill_names(root: Path) -> list[str]:
         if len(f.relative_to(root).parts) <= 5:
             names.add(f.parent.name)
     names |= {p.name for p in root.iterdir() if p.is_dir()}
-    return sorted(names)
+    return sorted(n for n in names if not n.startswith("."))
 
 
 def cmd_caps(a) -> int:
