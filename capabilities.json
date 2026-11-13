@@ -1,0 +1,22 @@
+{
+  "_설명": "손으로 관리하는 능력 목록. 맥미니에 실제로 설치된 스킬·플러그인·MCP 이름은 scripts/hub.py caps 가 capabilities.auto.json 에 모으고, 배정할 때 둘을 합쳐서 본다.",
+  "agents": {
+    "claude": {
+      "capabilities": ["code-review", "design-memo", "docs"],
+      "note": "2026-11-13 점검: UI/UX 점검 플러그인 미설치. 설치하면 그 이름을 needs 에 쓰면 된다."
+    },
+    "codex": {
+      "capabilities": ["implement", "bulk", "image", "computer-use"],
+      "note": "2026-11-13 점검: cua_repl·node_repl 사용 가능, context7·exa 는 로그인 안 됨. 기본 추론 강도 xhigh → 실행기가 작업마다 낮춰서 지정."
+    }
+  },
+  "type_defaults": {
+    "code": "codex",
+    "design": "claude",
+    "uiux": "claude",
+    "docs": "claude",
+    "bulk": "codex",
+    "general": "codex"
+  },
+  "known_needs": ["code-review", "design-memo", "docs", "image", "computer-use", "bulk"]
+}

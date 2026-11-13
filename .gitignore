@@ -1,0 +1,5 @@
+logs/
+.run.lock
+__pycache__/
+*.pyc
+.DS_Store
