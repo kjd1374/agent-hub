@@ -2,7 +2,7 @@
   "agent-hub": {
     "repo": "~/agent-hub",
     "github": "kjd1374/agent-hub",
-    "auto_merge": false,
+    "auto_merge": true,
     "description": "에이전트 작업 체계 자체(공용 장부·실행기)",
     "created": "2026-11-13 14:00"
   },
