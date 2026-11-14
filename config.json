@@ -1,5 +1,6 @@
 {
   "work_root": "~/agent-work",
+  "projects_root": "~/projects",
   "protected_paths": [
     "~/callminer-data",
     "~/Projects/commute-library",
@@ -46,5 +47,8 @@
   "push_branches": true,
   "ntfy_topic": "",
   "retry_minutes": 60,
-  "max_auto_retries": 12
+  "max_auto_retries": 12,
+  "web": {
+    "port": 8787
+  }
 }

@@ -10,7 +10,9 @@
   python3 scripts/hub.py status                작업 목록
   python3 scripts/hub.py release T-001 "메모"  넘김 상태로 (다른 기기·에이전트가 이어받게)
   python3 scripts/hub.py usage                 Codex 구독 사용량 (Claude는 claude 안에서 /usage)
-  python3 scripts/hub.py watch                 자동 확인 1회: 실행요청·재시도할 작업을 하나 실행 (launchd 가 5분마다)
+  python3 scripts/hub.py watch                 자동 확인: 실행요청·재시도할 작업을 없어질 때까지 실행 (launchd 5분마다, 웹은 요청 직후)
+  python3 scripts/hub.py merge T-001           검증완료 작업을 원래 브랜치에 반영하고 정리
+  python3 scripts/hub.py project-new 이름 "설명"  GitHub 비공개 저장소 생성 → ~/projects/이름 → 등록 (웹에서도 가능)
 """
 from __future__ import annotations
 
@@ -23,7 +25,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -34,6 +38,7 @@ import route as router  # noqa: E402
 from taskfile import Task  # noqa: E402
 
 TASKS = HUB / "tasks"
+PROJECTS = HUB / "projects.json"
 PROMPTS = HUB / "prompts"
 LOGS = HUB / "logs"
 SETTINGS = HUB / ".claude" / "settings.json"
@@ -102,8 +107,8 @@ def is_protected(path, cfg: dict) -> bool:
     return False
 
 
-def render(name: str, **vals) -> str:
-    text = (PROMPTS / f"{name}.md").read_text(encoding="utf-8")
+def render(_tpl: str, **vals) -> str:
+    text = (PROMPTS / f"{_tpl}.md").read_text(encoding="utf-8")
     for k, v in vals.items():
         text = text.replace("{{" + k + "}}", str(v))
     return text
@@ -142,9 +147,31 @@ def notify(cfg: dict, msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------- 공용 장부(git)
+_LOCK = threading.RLock()
+_LOCK_STATE = {"depth": 0, "fd": None}
+
+
+@contextmanager
+def hub_lock():
+    """공용 장부 git 작업 잠금. 웹 서버(여러 스레드)와 실행기(다른 프로세스)가 동시에 commit 하지 않게."""
+    with _LOCK:
+        if _LOCK_STATE["depth"] == 0:
+            _LOCK_STATE["fd"] = open(HUB / ".git-ops.lock", "w")
+            fcntl.flock(_LOCK_STATE["fd"], fcntl.LOCK_EX)
+        _LOCK_STATE["depth"] += 1
+        try:
+            yield
+        finally:
+            _LOCK_STATE["depth"] -= 1
+            if _LOCK_STATE["depth"] == 0:
+                fcntl.flock(_LOCK_STATE["fd"], fcntl.LOCK_UN)
+                _LOCK_STATE["fd"].close()
+
+
 def hub_pull() -> None:
     if has_remote(HUB):
-        git("pull", "--rebase", "--autostash", check=False, timeout=120)
+        with hub_lock():
+            git("pull", "--rebase", "--autostash", check=False, timeout=120)
 
 
 def hub_push() -> bool:
@@ -157,11 +184,12 @@ def hub_push() -> bool:
 
 
 def hub_commit(msg: str, paths: list[Path]) -> bool:
-    git("add", *[str(p) for p in paths])
-    if git("diff", "--cached", "--quiet", check=False).returncode == 0:
-        return True
-    git("commit", "-m", msg)
-    ok = hub_push()
+    with hub_lock():
+        git("add", *[str(p) for p in paths])
+        if git("diff", "--cached", "--quiet", check=False).returncode == 0:
+            return True
+        git("commit", "-m", msg)
+        ok = hub_push()
     if not ok:
         log("경고: 공용 장부 push 실패(네트워크?) — 기록은 이 맥에만 있음")
     return ok
@@ -295,26 +323,155 @@ def next_id() -> str:
     return f"T-{(max(nums) + 1 if nums else 1):03d}"
 
 
+def create_task(title: str, repo: str, goal: str = "", criteria: list | None = None, *, type: str = "auto",
+                difficulty: str = "auto", needs: str = "", assignee: str = "auto", verify: str = "",
+                status: str = "대기", after: str = "", origin: str = "cli", project: str = "") -> Task:
+    """작업 파일 하나를 만들어 공용 장부에 올린다(번호 충돌 없게 잠금 안에서)."""
+    with hub_lock():
+        hub_pull()
+        tid = next_id()
+        path = TASKS / f"{tid}.md"
+        path.write_text((TASKS / "TEMPLATE.md").read_text(encoding="utf-8"), encoding="utf-8")
+        t = Task(path)
+        for k, v in dict(id=tid, title=title.replace("\n", " ")[:120], repo=repo, type=type, difficulty=difficulty,
+                         needs=needs, assignee=assignee, verify=verify, status=status, created=now(),
+                         after=after, origin=origin, project=project).items():
+            t.set(k, v)
+        if goal:
+            t.replace_section("목표", goal)
+        if criteria:
+            t.replace_section("완료 기준", "\n".join(f"- [ ] {c}" for c in criteria))
+        sync(t, "작업 만듦")
+    return t
+
+
 def cmd_new(a) -> int:
-    hub_pull()
-    tid = next_id()
-    text = (TASKS / "TEMPLATE.md").read_text(encoding="utf-8")
-    path = TASKS / f"{tid}.md"
-    path.write_text(text, encoding="utf-8")
-    t = Task(path)
-    t.set("id", tid)
-    t.set("title", a.title)
-    t.set("repo", a.repo)
-    t.set("type", a.type)
-    t.set("difficulty", a.difficulty)
-    t.set("needs", a.needs)
-    t.set("assignee", a.assignee)
-    t.set("verify", a.verify)
-    t.set("created", now())
-    if a.goal:
-        t.replace_section("목표", a.goal)
-    sync(t, "작업 만듦")
-    print(f"만듦: {path}\n목표·완료 기준을 채운 뒤: python3 scripts/hub.py plan {tid}")
+    t = create_task(a.title, a.repo, a.goal, type=a.type, difficulty=a.difficulty, needs=a.needs,
+                    assignee=a.assignee, verify=a.verify)
+    print(f"만듦: {t.path}\n목표·완료 기준을 채운 뒤: python3 scripts/hub.py plan {t.id}")
+    return 0
+
+
+# ---------------------------------------------------------------------------- 프로젝트
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}$")
+
+
+def load_projects() -> dict:
+    return json.loads(PROJECTS.read_text(encoding="utf-8")) if PROJECTS.exists() else {}
+
+
+def save_projects(projects: dict, msg: str) -> None:
+    with hub_lock():
+        PROJECTS.write_text(json.dumps(projects, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        hub_commit(msg, [PROJECTS])
+
+
+def allowed_repo_paths(cfg: dict) -> list[Path]:
+    reps = list(cfg.get("allowed_repos", [])) + [p["repo"] for p in load_projects().values()]
+    return [expand(r).resolve() for r in reps]
+
+
+def project_for_repo(repo) -> tuple[str, dict]:
+    target = expand(repo).resolve()
+    for name, p in load_projects().items():
+        if expand(p["repo"]).resolve() == target:
+            return name, p
+    return "", {}
+
+
+def create_project(name: str, description: str, say=log) -> dict:
+    """GitHub 비공개 저장소 생성 → 맥미니에 내려받기 → 기본 규칙 파일 → 프로젝트 등록."""
+    cfg = load_cfg()
+    if not NAME_RE.match(name):
+        raise ValueError("프로젝트 이름은 영어 소문자·숫자·하이픈(-)만, 2~39자")
+    if name in load_projects():
+        raise ValueError(f"이미 있는 프로젝트: {name}")
+    root = expand(cfg.get("projects_root", "~/projects"))
+    path = root / name
+    if path.exists():
+        raise ValueError(f"폴더가 이미 있음: {path}")
+    if is_protected(path, cfg):
+        raise ValueError(f"보호 경로와 겹침: {path}")
+    gh = agents.find("gh")
+    if not gh:
+        raise RuntimeError("gh 명령을 찾을 수 없음")
+    owner = sh([gh, "api", "user", "-q", ".login"], timeout=60, check=True).stdout.strip()
+    say(f"GitHub 비공개 저장소 만드는 중: {owner}/{name}")
+    sh([gh, "repo", "create", f"{owner}/{name}", "--private", "--add-readme",
+        "--description", description[:300] or name], timeout=120, check=True)
+    root.mkdir(parents=True, exist_ok=True)
+    say(f"맥미니에 내려받는 중: {path}")
+    sh([gh, "repo", "clone", f"{owner}/{name}", str(path)], timeout=300, check=True)
+    for key in ("user.name", "user.email"):  # 맥 전체 설정은 건드리지 않고 이 저장소에만
+        v = git("config", key, check=False).stdout.strip()
+        if v:
+            git("config", key, v, cwd=path)
+    (path / "AGENTS.md").write_text(render("project-agents", name=name, description=description or name),
+                                    encoding="utf-8")
+    (path / ".gitignore").write_text("node_modules/\n.venv/\n__pycache__/\n.DS_Store\ndist/\n.env\n", encoding="utf-8")
+    git("add", "-A", cwd=path)
+    git("commit", "-m", "기본 규칙 파일(AGENTS.md)·.gitignore", cwd=path)
+    git("push", cwd=path, check=False, timeout=120)
+    projects = load_projects()
+    projects[name] = {"repo": f"{cfg.get('projects_root', '~/projects')}/{name}", "github": f"{owner}/{name}",
+                      "auto_merge": True, "description": description, "created": now()}
+    save_projects(projects, f"프로젝트 등록: {name}")
+    say("완료")
+    return projects[name]
+
+
+def propose_plan(name: str, goal: str) -> list[dict]:
+    """Claude(설계 담당)가 목표를 작업 목록으로 쪼갠다. Claude 한도면 Codex. 파일은 고치지 않는다."""
+    cfg = load_cfg()
+    proj = load_projects()[name]
+    prompt = render("project-plan", name=name, description=proj.get("description", ""), goal=goal,
+                    verify_allowed=", ".join(cfg.get("verify_allowed", [])))
+    d = LOGS / "plans"
+    d.mkdir(parents=True, exist_ok=True)
+    stamp = f"{datetime.now():%m%d-%H%M%S}"
+    cwd = expand(proj["repo"])
+    r = agents.run_claude(prompt, cwd, d / f"{stamp}-{name}-claude.log", mode="read", settings=SETTINGS, timeout=900)
+    if not r.ok:
+        r = agents.run_codex(prompt, cwd, d / f"{stamp}-{name}-codex.log", write=False,
+                             effort=cfg["effort"]["implement"]["중"], timeout=900)
+    data = extract_json(r.text) if r.ok else None
+    if not data or not isinstance(data.get("tasks"), list):
+        raise RuntimeError("작업 계획을 만들지 못함" + (" (사용량 한도)" if r.limit else ""))
+    out = []
+    for x in data["tasks"][:10]:
+        if not isinstance(x, dict) or not x.get("title"):
+            continue
+        verify = str(x.get("verify") or "")
+        if verify and not verify_allowed(verify, cfg):
+            verify = ""
+        out.append({"title": str(x["title"])[:120], "goal": str(x.get("goal") or ""),
+                    "criteria": [str(c) for c in (x.get("criteria") or [])][:8],
+                    "type": x.get("type") if x.get("type") in router.TYPES else "auto",
+                    "difficulty": x.get("difficulty") if x.get("difficulty") in ("하", "중", "상") else "auto",
+                    "verify": verify})
+    return out
+
+
+def start_plan(name: str, tasks: list[dict]) -> list[str]:
+    """작업들을 순서대로 실행요청으로 만든다. 앞 작업이 완료돼야 다음이 시작(after)."""
+    proj = load_projects()[name]
+    ids, prev = [], ""
+    for x in tasks:
+        t = create_task(x["title"], proj["repo"], x.get("goal", ""), x.get("criteria"), type=x.get("type", "auto"),
+                        difficulty=x.get("difficulty", "auto"), verify=x.get("verify", ""), status="실행요청",
+                        after=prev, origin="web", project=name)
+        ids.append(t.id)
+        prev = t.id
+    return ids
+
+
+def verify_allowed(cmd: str, cfg: dict) -> bool:
+    prefixes = cfg.get("verify_allowed", [])
+    return not SHELL_META.search(cmd) and any(cmd == p or cmd.startswith(p + " ") for p in prefixes)
+
+
+def cmd_project_new(a) -> int:
+    create_project(a.name, a.description)
     return 0
 
 
@@ -448,8 +605,30 @@ class Runner:
         self.wt = wt
         t.set("branch", branch)
         t.set("worktree", str(wt))
+        if not t.get("target_branch"):
+            t.set("target_branch", git("rev-parse", "--abbrev-ref", "HEAD", cwd=self.repo).stdout.strip())
         if not t.get("base"):
             t.set("base", git("rev-parse", "HEAD", cwd=wt).stdout.strip())
+
+    def prepare_deps(self) -> None:
+        """에이전트 샌드박스는 인터넷이 막혀 있어서, 의존성 설치는 실행기가 정해진 명령으로만 대신 한다."""
+        pkg, mods = self.wt / "package.json", self.wt / "node_modules"
+        if not pkg.exists() or (mods.exists() and mods.stat().st_mtime >= pkg.stat().st_mtime):
+            return
+        npm = agents.find("npm")
+        if not npm:
+            self.t.append("한 일", f"- {now()} 의존성 설치 건너뜀: npm 없음")
+            return
+        log("의존성 설치: npm install")
+        try:
+            p = subprocess.run([npm, "install", "--no-audit", "--no-fund"], cwd=str(self.wt), capture_output=True,
+                               text=True, timeout=self.cfg["verify_timeout_sec"], env=agents.clean_env())
+            res = "완료" if p.returncode == 0 else f"실패(코드 {p.returncode}): {(p.stderr or p.stdout).strip()[-300:]}"
+        except subprocess.TimeoutExpired:
+            res = "시간 초과"
+        if mods.exists():
+            os.utime(mods)
+        self.t.append("한 일", f"- {now()} 실행기: npm install {res}")
 
     def commit_wt(self, msg: str) -> bool:
         git("add", "-A", cwd=self.wt)
@@ -536,6 +715,7 @@ class Runner:
             sync(t, "설계 메모")
 
         if stage in ("", "designed"):
+            self.prepare_deps()
             design = t.section("설계 메모")
             prompt = render("implement" if t.get("type") == "code" else "do", **ctx,
                             design=f"설계 메모(이대로 따를 것):\n{design}" if design else "")
@@ -554,6 +734,7 @@ class Runner:
             sync(t, f"{impl} 작성")
 
         while stage == "implemented":
+            self.prepare_deps()
             ok, vout = self.verify()
             reviewer = router.other(t.get("impl"))
             prompt = render("review", **ctx, verify_result=vout, diff=self.diff())
@@ -585,6 +766,12 @@ class Runner:
         if cfg.get("push_branches") and has_remote(self.repo):
             p = git("push", "-u", "origin", t.get("branch"), cwd=self.wt, check=False, timeout=180)
             pushed = "원격에 브랜치 올림" if p.returncode == 0 else "원격 push 실패(로컬에만 있음)"
+        _, proj = project_for_repo(self.repo)
+        if proj.get("auto_merge"):  # 새로 만든 프로젝트: 검증 통과하면 바로 반영해서 다음 작업이 이어받게
+            t.set("status", "검증완료")
+            ok, msg = merge_task(t, cfg)
+            log(f"자동 반영: {msg}")
+            raise Stop(0 if ok else 1)
         self.stop("검증완료",
                   f"- 사용자 확인 후 병합: `git -C {self.repo} merge {t.get('branch')}`\n"
                   f"- 결과 보기: `cd {self.wt}`\n"
@@ -592,18 +779,76 @@ class Runner:
                   + (f"- {pushed}\n" if pushed else ""), 0)
 
 
+def _merge_branch(t: Task) -> tuple[bool, str]:
+    repo, branch = expand(t.get("repo")), t.get("branch")
+    target = t.get("target_branch") or "main"
+    cur = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo, check=False).stdout.strip()
+    if cur != target:
+        return False, f"{t.get('repo')} 가 지금 '{cur}' 브랜치라서 반영하지 않음(반영 대상 '{target}')"
+    if git("status", "--porcelain", "--untracked-files=no", cwd=repo).stdout.strip():
+        return False, f"{t.get('repo')} 에 저장 안 된 변경이 있어 반영하지 않음(사람이 작업 중일 수 있음)"
+    remote = has_remote(repo)
+    if remote:
+        git("pull", "--ff-only", cwd=repo, check=False, timeout=120)
+    m = git("merge", "--no-ff", "-m", f"{t.id}: {t.get('title')} 반영", branch, cwd=repo, check=False)
+    if m.returncode != 0:
+        git("merge", "--abort", cwd=repo, check=False)
+        return False, "다른 변경과 충돌해서 자동 반영 실패 → 수정 요청으로 다시 맡기거나 사람이 확인"
+    commit = git("rev-parse", "--short", "HEAD", cwd=repo).stdout.strip()
+    t.set("merged", git("rev-parse", "HEAD", cwd=repo).stdout.strip())  # 반영 뒤에도 변경 내용을 보여주려고
+    note = ""
+    if remote:
+        if git("push", cwd=repo, check=False, timeout=180).returncode != 0:
+            git("pull", "--rebase=merges", cwd=repo, check=False, timeout=120)
+            if git("push", cwd=repo, check=False, timeout=180).returncode != 0:
+                note = " · GitHub 올리기 실패(맥미니에는 반영됨)"
+    wt = t.get("worktree")
+    if wt and expand(wt).exists():
+        git("worktree", "remove", "--force", wt, cwd=repo, check=False)
+    git("branch", "-d", branch, cwd=repo, check=False)
+    if remote:
+        git("push", "origin", "--delete", branch, cwd=repo, check=False, timeout=120)
+    return True, f"반영 완료(커밋 {commit}){note}"
+
+
+def merge_task(t: Task, cfg: dict) -> tuple[bool, str]:
+    """검증완료 작업을 원래 브랜치에 합치고 작업 폴더·브랜치를 정리한다. 충돌이면 합치지 않는다."""
+    if t.get("status") != "검증완료":
+        return False, f"상태가 '{t.get('status')}' → 검증완료인 작업만 반영"
+    is_hub = expand(t.get("repo")).resolve() == HUB.resolve()
+    if is_hub:
+        with hub_lock():
+            ok, msg = _merge_branch(t)
+    else:
+        ok, msg = _merge_branch(t)
+    if ok:
+        t.set("status", "완료")
+        t.replace_section("남은 일", f"- {now()} {msg}")
+    else:
+        t.append("남은 일", f"- {now()} 반영 실패: {msg}")
+    sync(t, "반영" if ok else "반영 실패")
+    notify(cfg, f"[agent-hub] {t.id} {'반영 완료' if ok else '반영 실패'}: {t.get('title')}")
+    return ok, msg
+
+
+def cmd_merge(a) -> int:
+    hub_pull()
+    ok, msg = merge_task(load_task(a.id), load_cfg())
+    print(msg)
+    return 0 if ok else 1
+
+
 def task_problems(t: Task, cfg: dict) -> list[str]:
     """돌쇠 등 밖에서 쓴 작업 파일도 안전하게: 허용된 저장소만, 검증 명령은 허용 목록만."""
     probs = []
     repo = expand(t.get("repo") or "~/agent-hub").resolve()
-    allowed = [expand(r).resolve() for r in cfg.get("allowed_repos", [])]
-    if repo not in allowed:
-        probs.append(f"대상 저장소 {t.get('repo')} 가 config.json 의 allowed_repos 에 없음")
+    if repo not in allowed_repo_paths(cfg):
+        probs.append(f"대상 저장소 {t.get('repo')} 가 등록된 프로젝트(projects.json·allowed_repos)가 아님")
+    elif is_protected(repo, cfg):
+        probs.append(f"대상 저장소 {t.get('repo')} 가 보호 경로와 겹침")
     cmd = t.get("verify")
-    if cmd:
-        prefixes = cfg.get("verify_allowed", [])
-        if SHELL_META.search(cmd) or not any(cmd == p or cmd.startswith(p + " ") for p in prefixes):
-            probs.append(f"검증 명령 `{cmd}` 가 허용 목록(config.json 의 verify_allowed)에 없거나 특수문자(; | & > $ 등)를 씀")
+    if cmd and not verify_allowed(cmd, cfg):
+        probs.append(f"검증 명령 `{cmd}` 가 허용 목록(config.json 의 verify_allowed)에 없거나 특수문자(; | & > $ 등)를 씀")
     return probs
 
 
@@ -648,10 +893,23 @@ def run_task(tid: str, force: bool = False, restart: bool = False) -> int:
         ensure_classified(t, cfg, caps)
         plan = decide(t, cfg, caps)
         if plan["mode"] == "dot":
-            t.set("status", "돌쇠로")
-            t.replace_section("남은 일", "- 단순 질문: 돌쇠에게 그대로 물어볼 것")
-            sync(t, "돌쇠로")
-            return 0
+            if t.get("origin") != "web":
+                t.set("status", "돌쇠로")
+                t.replace_section("남은 일", "- 단순 질문: 돌쇠에게 그대로 물어볼 것")
+                sync(t, "돌쇠로")
+                return 0
+            # 웹에서 온 질문: 한도가 넉넉한 GPT(Codex, 읽기 전용)가 그 프로젝트 폴더를 보고 바로 답한다
+            log("질문 → Codex 답변(읽기 전용)")
+            d = LOGS / t.id
+            n = len(list(d.glob("*.log"))) + 1 if d.exists() else 1
+            r = agents.run_codex(render("answer", question=t.section("목표") or t.get("title")),
+                                 expand(t.get("repo")), d / f"{n:02d}-{datetime.now():%m%d-%H%M}-answer-codex.log",
+                                 write=False, effort=cfg["effort"]["classify"], timeout=900)
+            t.replace_section("최근 결과", r.text.strip()[:6000] if r.ok else f"답변 실패: {'사용량 한도' if r.limit else r.error}")
+            t.append("사용량 기록", f"- {now()} codex answer: {r.usage or '확인 불가'} · {r.seconds:.0f}초")
+            t.set("status", "답변완료" if r.ok else "보고필요")
+            sync(t, "답변")
+            return 0 if r.ok else 1
         if plan["mode"] == "blocked":
             t.set("status", "보고필요")
             t.replace_section("남은 일", "- 배정 불가: '배정 기록' 확인")
@@ -679,27 +937,39 @@ def run_task(tid: str, force: bool = False, restart: bool = False) -> int:
 
 
 def watch_candidates(cutoff: str) -> list[str]:
-    """실행요청 작업, 그리고 재시도 시각이 지난 대기(사용량) 작업. 번호 순."""
-    ids = []
+    """실행요청 작업, 그리고 재시도 시각이 지난 대기(사용량) 작업. 번호 순.
+    after 가 있으면 그 작업이 완료(반영)된 뒤에만."""
+    tasks = {}
     for f in sorted(TASKS.glob("T-*.md")):
         try:
             t = Task(f)
         except ValueError:
             continue
+        tasks[t.id] = t
+    ids = []
+    for tid, t in tasks.items():
         st = t.get("status")
-        if st == "실행요청" or (st == "대기(사용량)" and t.get("retry_after") and t.get("retry_after") <= cutoff):
-            ids.append(t.id)
+        due = st == "실행요청" or (st == "대기(사용량)" and t.get("retry_after") and t.get("retry_after") <= cutoff)
+        dep = t.get("after")
+        if due and (not dep or dep not in tasks or tasks[dep].get("status") in ("완료", "답변완료")):
+            ids.append(tid)
     return ids
 
 
 def cmd_watch(a) -> int:
-    """launchd 가 5분마다 부른다. 할 일이 없으면 아무것도 출력하지 않고 끝난다(로그가 쌓이지 않게)."""
-    hub_pull()
-    ids = watch_candidates(now())
-    if not ids:
-        return 0
-    log(f"자동 확인: {', '.join(ids)} 중 {ids[0]} 실행")
-    return run_task(ids[0])
+    """launchd 가 5분마다(웹은 요청 직후) 부른다. 실행할 작업이 없어질 때까지 하나씩 처리한다.
+    할 일이 없으면 아무것도 출력하지 않는다(로그가 쌓이지 않게)."""
+    done: set[str] = set()
+    while True:
+        hub_pull()
+        ids = [i for i in watch_candidates(now()) if i not in done]
+        if not ids:
+            return 0
+        log(f"자동 확인: {', '.join(ids)} 중 {ids[0]} 실행")
+        code = run_task(ids[0])
+        done.add(ids[0])
+        if code in (2, 3):  # 점검 실패·다른 실행 중 → 다음 확인 때
+            return code
 
 
 # ---------------------------------------------------------------------------- 진입점
@@ -712,6 +982,13 @@ def main() -> int:
     sub.add_parser("usage").set_defaults(fn=cmd_usage)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     sub.add_parser("watch").set_defaults(fn=cmd_watch)
+    p = sub.add_parser("merge")
+    p.add_argument("id")
+    p.set_defaults(fn=cmd_merge)
+    p = sub.add_parser("project-new")
+    p.add_argument("name")
+    p.add_argument("description", nargs="?", default="")
+    p.set_defaults(fn=cmd_project_new)
     p = sub.add_parser("new")
     p.add_argument("title")
     p.add_argument("--repo", default="~/agent-hub", help="작업할 git 저장소(맥미니 경로)")

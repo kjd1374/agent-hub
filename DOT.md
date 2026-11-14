@@ -36,7 +36,8 @@ created: 2026-11-14 10:00
 - [ ] 확인 가능한 기준 2
 ```
 
-- `repo` 는 다음 중 하나만: `~/agent-hub`, `~/viet` (config.json 의 allowed_repos). 다른 곳이 필요하면 사용자에게 먼저 묻는다.
+- `repo` 는 `projects.json` 에 등록된 프로젝트의 repo 값만 쓴다(예: `~/viet`, `~/projects/이름`). 새 프로젝트는 웹 작업실에서 만든다. 다른 곳이 필요하면 사용자에게 먼저 묻는다.
+- `project:` 줄에 프로젝트 이름을 적는다(예: `project: viet`).
 - `verify` 는 비워 두거나 다음으로 시작하는 명령만: `python3 -m unittest`, `python3 -m pytest`, `pytest`, `npm test`, `npm run test`,
   `npm run build`, `npm run lint`, `npx tsc`, `npx vitest run`, `npx playwright test`. `;` `|` `&` `>` `$` 같은 기호는 쓰지 않는다.
 - `type`·`difficulty` 는 모르면 auto. `assignee` 는 사용자가 특정 에이전트를 원할 때만 claude 또는 codex.
@@ -47,7 +48,8 @@ created: 2026-11-14 10:00
 
 | status | 보고할 내용 |
 |---|---|
-| 검증완료 | 무엇이 만들어졌고 검증이 통과했다. 병합은 사용자 확인 후(남은 일의 명령) |
+| 검증완료 | 무엇이 만들어졌고 검증이 통과했다. 반영은 사용자가 웹 작업실에서 [반영] |
+| 완료 | 반영까지 끝남 |
 | 보고필요 | 무엇이 막혔는지(남은 일·최근 리뷰). 사용자 결정 필요 |
 | 대기(사용량) | 구독 한도. 자동 재시도 예정 시각 |
 | 돌쇠로 | 단순 질문으로 분류됨 → 네가 직접 답한다 |

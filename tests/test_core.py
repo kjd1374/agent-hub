@@ -124,7 +124,8 @@ class HelperTest(unittest.TestCase):
         return t
 
     def test_task_problems(self):
-        cfg = {"allowed_repos": ["~/agent-hub", "~/viet"], "verify_allowed": ["npm test", "python3 -m unittest"]}
+        cfg = {"allowed_repos": ["~/agent-hub", "~/viet"], "protected_paths": ["~/NAS"],
+               "verify_allowed": ["npm test", "python3 -m unittest"]}
         with tempfile.TemporaryDirectory() as d:
             ok = self._task(Path(d), "T-001", repo="~/viet", verify="npm test")
             self.assertEqual(hub.task_problems(ok, cfg), [])
@@ -140,10 +141,13 @@ class HelperTest(unittest.TestCase):
             self._task(Path(d), "T-003", status="대기(사용량)", retry_after="2026-11-14 10:00")
             self._task(Path(d), "T-004", status="대기(사용량)", retry_after="2026-11-14 12:00")
             self._task(Path(d), "T-005", status="대기")
+            self._task(Path(d), "T-006", status="실행요청", after="T-002")   # 앞 작업이 아직 실행요청 → 기다림
+            self._task(Path(d), "T-007", status="실행요청", after="T-008")
+            self._task(Path(d), "T-008", status="완료")                       # 앞 작업 완료 → 실행
             old = hub.TASKS
             hub.TASKS = Path(d)
             try:
-                self.assertEqual(hub.watch_candidates("2026-11-14 11:00"), ["T-002", "T-003"])
+                self.assertEqual(hub.watch_candidates("2026-11-14 11:00"), ["T-002", "T-003", "T-007"])
             finally:
                 hub.TASKS = old
 

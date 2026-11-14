@@ -1,12 +1,31 @@
 # agent-hub
 
-여러 컴퓨터와 AI 에이전트(Claude Code, Codex, 돌쇠)를 하나로 묶는 **공용 장부 + 실행기**.
+여러 AI 에이전트(Claude Code, Codex)를 하나로 묶는 **웹 작업실 + 실행 엔진**. 맥미니에서 돌고, Tailscale 에 연결된 내 기기(폰·노트북)에서 연다.
 
-- 작업 1건 = `tasks/T-번호.md` 파일 1개. 상태·배정 이유·한 일·검증·남은 일·사용량이 전부 여기 남는다.
-- 실제 작업은 맥미니의 전용 작업 폴더 `~/agent-work/T-번호` (git worktree)에서. 원래 폴더는 안 건드린다.
-- 기본 흐름: **Codex 분류 → 규칙으로 배정 → Codex 작성 → Claude 검증 → (최대 2번) 수정 → 검증완료**.
-- 유료 API 경로 없음. API 키 변수가 있으면 실행 자체를 거부한다.
-- 보호 경로(`config.json`): 통화 녹음·분석, 출근길 보관함, NAS 크롤러 등은 에이전트가 읽지도 쓰지도 못하게 막는다.
+- **새 프로젝트**: 이름과 목표만 적으면 GitHub 비공개 저장소 생성 → Claude 가 작업 계획 → 순서대로 실행 → 검증 통과하면 자동 반영.
+- **지시**: 프로젝트 화면에 말로 적으면, 질문은 GPT 가 바로 답하고 작업은 알맞은 에이전트에게 맡긴다
+  (코딩: Codex 작성 → Claude 검증, 문서·설계·UI 점검: Claude 작성 → Codex 검증, 최대 2번 고침).
+- **반영**: 기존 프로젝트(viet 등)는 결과를 보고 [반영] 버튼. 새 프로젝트는 자동 반영(설정에서 끌 수 있음).
+- 유료 API 경로 없음(API 키 변수가 있으면 실행 거부). 보호 경로(통화 녹음·출근길 보관함·NAS 등)는 에이전트 접근 금지.
+- 기록은 전부 `tasks/T-번호.md` 에 남고 GitHub 에 올라간다(다른 기기·에이전트·돌쇠가 이어받기 가능).
+
+## 웹 작업실 설치 (맥미니, 처음 한 번)
+
+```bash
+cd ~/agent-hub && git pull
+```
+
+```bash
+python3 web/server.py passwd
+```
+
+```bash
+scripts/services.sh install
+```
+
+마지막 줄에 나오는 주소(`http://100.x.x.x:8787`)를 Tailscale 이 켜진 폰·노트북 브라우저에서 연다.
+코드를 새로 받은 뒤에는 `scripts/services.sh restart`. 상태는 `status`, 제거는 `uninstall`.
+설치되는 것은 맥 자동 실행 항목 2개뿐이다: 웹(`kr.personal.agent-hub-web`), 5분마다 작업 확인(`kr.personal.agent-hub-watch`).
 
 ## 처음 한 번 (맥미니)
 
@@ -50,7 +69,9 @@ python3 scripts/hub.py caps
 | 실행요청 | 자동 확인이 5분 안에 실행 | 기다림 |
 | 진행 | 실행 중 | 기다림. `status`·로그로 확인 |
 | 대기(사용량) | 두 에이전트 모두 한도 | 자동 확인이 60분마다 재시도(멈춘 단계부터). 직접 하려면 같은 명령 |
-| 검증완료 | Claude(또는 반대쪽) 검증 통과 | 작업 파일 `## 남은 일` 의 병합 명령으로 확인 후 병합 |
+| 검증완료 | 반대쪽 에이전트 검증 통과 | 웹에서 [반영] 버튼(또는 `python3 scripts/hub.py merge T-번호`) |
+| 완료 | 반영됨 | - |
+| 답변완료 | 질문에 GPT 가 답함 | 웹에서 확인 |
 | 보고필요 | 실패·판정 불가·2번 수정해도 미통과 | `## 최근 리뷰`·`## 남은 일` 보고 결정 |
 | 돌쇠로 | 단순 질문 | 돌쇠에게 그대로 묻기 |
 | 넘김 | 다른 기기·에이전트가 이어받을 차례 | 이어받을 곳에서 실행 |
@@ -71,13 +92,9 @@ python3 scripts/hub.py caps
 맥미니의 자동 확인 서비스가 5분마다 `hub.py watch` 를 돌려 실행요청 작업을 하나씩 실행하고, 결과를 같은 파일에 push 한다.
 돌쇠는 맥미니에 직접 접근하지 않는다.
 
-```bash
-scripts/install-watcher.sh install
-```
+자동 확인은 `scripts/services.sh install` 로 웹과 함께 설치된다. 로그는 `logs/kr.personal.agent-hub-watch.log`, `logs/watch.log`.
 
-`status` 로 상태, `uninstall` 로 제거. 로그는 `logs/watch.log`.
-
-안전장치: 대상 저장소는 `allowed_repos` 만, 검증 명령은 `verify_allowed` 로 시작하는 것만(특수문자 금지).
+안전장치: 대상 저장소는 등록된 프로젝트(`projects.json`)와 `allowed_repos` 만, 검증 명령은 `verify_allowed` 로 시작하는 것만(특수문자 금지).
 어기면 실행하지 않고 보고필요로 남긴다. 대기(사용량) 작업은 `retry_minutes`(60분)마다 자동 재시도, `max_auto_retries`(12회) 넘으면 보고필요.
 
 ## 돌쇠·폰에서 부를 때

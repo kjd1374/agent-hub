@@ -1,0 +1,16 @@
+{
+  "agent-hub": {
+    "repo": "~/agent-hub",
+    "github": "kjd1374/agent-hub",
+    "auto_merge": false,
+    "description": "에이전트 작업 체계 자체(공용 장부·실행기)",
+    "created": "2026-11-13 14:00"
+  },
+  "viet": {
+    "repo": "~/viet",
+    "github": "kjd1374/viet",
+    "auto_merge": false,
+    "description": "가상 피팅·코디 보드 앱",
+    "created": "2026-11-14 00:00"
+  }
+}
