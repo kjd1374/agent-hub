@@ -11,6 +11,22 @@
     "~/.config/gh",
     "~/.codex/auth.json"
   ],
+  "allowed_repos": [
+    "~/agent-hub",
+    "~/viet"
+  ],
+  "verify_allowed": [
+    "python3 -m unittest",
+    "python3 -m pytest",
+    "pytest",
+    "npm test",
+    "npm run test",
+    "npm run build",
+    "npm run lint",
+    "npx tsc",
+    "npx vitest run",
+    "npx playwright test"
+  ],
   "min_free_gb": 10,
   "codex_busy_percent": 90,
   "review_rounds": 2,
@@ -19,10 +35,16 @@
   "max_diff_chars": 60000,
   "effort": {
     "classify": "low",
-    "implement": {"하": "medium", "중": "medium", "상": "high"},
+    "implement": {
+      "하": "medium",
+      "중": "medium",
+      "상": "high"
+    },
     "fix": "medium",
     "review": "medium"
   },
   "push_branches": true,
-  "ntfy_topic": ""
+  "ntfy_topic": "",
+  "retry_minutes": 60,
+  "max_auto_retries": 12
 }

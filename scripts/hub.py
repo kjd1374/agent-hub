@@ -10,6 +10,7 @@
   python3 scripts/hub.py status                작업 목록
   python3 scripts/hub.py release T-001 "메모"  넘김 상태로 (다른 기기·에이전트가 이어받게)
   python3 scripts/hub.py usage                 Codex 구독 사용량 (Claude는 claude 안에서 /usage)
+  python3 scripts/hub.py watch                 자동 확인 1회: 실행요청·재시도할 작업을 하나 실행 (launchd 가 5분마다)
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ import socket
 import subprocess
 import sys
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HUB = Path(__file__).resolve().parent.parent
@@ -36,7 +37,8 @@ TASKS = HUB / "tasks"
 PROMPTS = HUB / "prompts"
 LOGS = HUB / "logs"
 SETTINGS = HUB / ".claude" / "settings.json"
-RUNNABLE = ("대기", "넘김", "대기(사용량)")
+RUNNABLE = ("대기", "실행요청", "넘김", "대기(사용량)")
+SHELL_META = re.compile(r"[;&|<>`$\\\n]")
 BASH_DENY = ("sudo", "crontab", "launchctl", "pm2", "rm -rf", "git push --force", "git push -f",
              "brew install", "brew uninstall", "npm install -g", "pip install --user")
 
@@ -404,6 +406,15 @@ class Runner:
 
     # -- 기록·멈춤
     def stop(self, status: str, remain: str, code: int = 1):
+        if status == "대기(사용량)":  # 자동 확인(watch)이 일정 시간 뒤 다시 시도. 너무 많이 실패하면 사람에게 넘김
+            tries = int(self.t.get("auto_retries") or 0) + 1
+            self.t.set("auto_retries", tries)
+            if tries > self.cfg.get("max_auto_retries", 12):
+                status, remain = "보고필요", remain + f"\n- 자동 재시도 {tries - 1}회 모두 한도 → 사람이 확인"
+            else:
+                due = datetime.now() + timedelta(minutes=self.cfg.get("retry_minutes", 60))
+                self.t.set("retry_after", due.strftime("%Y-%m-%d %H:%M"))
+                remain += f"\n- 자동 재시도 예정: {due:%m-%d %H:%M} 이후"
         self.t.set("status", status)
         self.t.replace_section("남은 일", remain)
         sync(self.t, status)
@@ -581,7 +592,26 @@ class Runner:
                   + (f"- {pushed}\n" if pushed else ""), 0)
 
 
+def task_problems(t: Task, cfg: dict) -> list[str]:
+    """돌쇠 등 밖에서 쓴 작업 파일도 안전하게: 허용된 저장소만, 검증 명령은 허용 목록만."""
+    probs = []
+    repo = expand(t.get("repo") or "~/agent-hub").resolve()
+    allowed = [expand(r).resolve() for r in cfg.get("allowed_repos", [])]
+    if repo not in allowed:
+        probs.append(f"대상 저장소 {t.get('repo')} 가 config.json 의 allowed_repos 에 없음")
+    cmd = t.get("verify")
+    if cmd:
+        prefixes = cfg.get("verify_allowed", [])
+        if SHELL_META.search(cmd) or not any(cmd == p or cmd.startswith(p + " ") for p in prefixes):
+            probs.append(f"검증 명령 `{cmd}` 가 허용 목록(config.json 의 verify_allowed)에 없거나 특수문자(; | & > $ 등)를 씀")
+    return probs
+
+
 def cmd_run(a) -> int:
+    return run_task(a.id, force=a.force, restart=a.restart)
+
+
+def run_task(tid: str, force: bool = False, restart: bool = False) -> int:
     cfg, caps = load_cfg(), load_caps()
     LOGS.mkdir(exist_ok=True)
     lockf = open(HUB / ".run.lock", "w")
@@ -596,13 +626,22 @@ def cmd_run(a) -> int:
             log(f"점검 실패: {msg}")
         return 2
     hub_pull()
-    t = load_task(a.id)
+    t = load_task(tid)
     host = socket.gethostname()
     st = t.get("status", "대기")
-    if st not in RUNNABLE and not (st == "진행" and t.get("runner") == host) and not a.force:
+    if st not in RUNNABLE and not (st == "진행" and t.get("runner") == host) and not force:
         log(f"{t.id} 상태가 '{st}' → 실행 안 함 (강제로 하려면 --force)")
         return 1
-    if a.restart:
+    probs = task_problems(t, cfg)
+    if probs:
+        t.set("status", "보고필요")
+        t.replace_section("남은 일", "\n".join(f"- 실행 거부: {p}" for p in probs))
+        sync(t, "실행 거부")
+        notify(cfg, f"[agent-hub] {t.id} 실행 거부: {t.get('title')}")
+        for p in probs:
+            log(f"실행 거부: {p}")
+        return 1
+    if restart:
         for k in ("stage", "round", "impl"):
             t.set(k, "")
     try:
@@ -639,6 +678,30 @@ def cmd_run(a) -> int:
     return 0
 
 
+def watch_candidates(cutoff: str) -> list[str]:
+    """실행요청 작업, 그리고 재시도 시각이 지난 대기(사용량) 작업. 번호 순."""
+    ids = []
+    for f in sorted(TASKS.glob("T-*.md")):
+        try:
+            t = Task(f)
+        except ValueError:
+            continue
+        st = t.get("status")
+        if st == "실행요청" or (st == "대기(사용량)" and t.get("retry_after") and t.get("retry_after") <= cutoff):
+            ids.append(t.id)
+    return ids
+
+
+def cmd_watch(a) -> int:
+    """launchd 가 5분마다 부른다. 할 일이 없으면 아무것도 출력하지 않고 끝난다(로그가 쌓이지 않게)."""
+    hub_pull()
+    ids = watch_candidates(now())
+    if not ids:
+        return 0
+    log(f"자동 확인: {', '.join(ids)} 중 {ids[0]} 실행")
+    return run_task(ids[0])
+
+
 # ---------------------------------------------------------------------------- 진입점
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -648,6 +711,7 @@ def main() -> int:
     sub.add_parser("protect").set_defaults(fn=cmd_protect)
     sub.add_parser("usage").set_defaults(fn=cmd_usage)
     sub.add_parser("status").set_defaults(fn=cmd_status)
+    sub.add_parser("watch").set_defaults(fn=cmd_watch)
     p = sub.add_parser("new")
     p.add_argument("title")
     p.add_argument("--repo", default="~/agent-hub", help="작업할 git 저장소(맥미니 경로)")

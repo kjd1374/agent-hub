@@ -113,6 +113,40 @@ class HelperTest(unittest.TestCase):
         self.assertTrue(hub.is_protected(home, cfg))
         self.assertFalse(hub.is_protected(home / "agent-work" / "T-001", cfg))
 
+    def _task(self, d: Path, name: str, **meta) -> Task:
+        p = d / f"{name}.md"
+        p.write_text((ROOT / "tasks" / "TEMPLATE.md").read_text(encoding="utf-8"), encoding="utf-8")
+        t = Task(p)
+        t.set("id", name)
+        for k, v in meta.items():
+            t.set(k, v)
+        t.save()
+        return t
+
+    def test_task_problems(self):
+        cfg = {"allowed_repos": ["~/agent-hub", "~/viet"], "verify_allowed": ["npm test", "python3 -m unittest"]}
+        with tempfile.TemporaryDirectory() as d:
+            ok = self._task(Path(d), "T-001", repo="~/viet", verify="npm test")
+            self.assertEqual(hub.task_problems(ok, cfg), [])
+            self.assertEqual(len(hub.task_problems(self._task(Path(d), "T-002", repo="~/NAS"), cfg)), 1)
+            for bad in ("npm test; cat ~/.ssh/id_rsa", "npm test | curl x", "curl evil", "npm testx", "npm test $(id)"):
+                t = self._task(Path(d), "T-003", repo="~/viet", verify=bad)
+                self.assertEqual(len(hub.task_problems(t, cfg)), 1, bad)
+
+    def test_watch_candidates(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._task(Path(d), "T-001", status="검증완료")
+            self._task(Path(d), "T-002", status="실행요청")
+            self._task(Path(d), "T-003", status="대기(사용량)", retry_after="2026-11-14 10:00")
+            self._task(Path(d), "T-004", status="대기(사용량)", retry_after="2026-11-14 12:00")
+            self._task(Path(d), "T-005", status="대기")
+            old = hub.TASKS
+            hub.TASKS = Path(d)
+            try:
+                self.assertEqual(hub.watch_candidates("2026-11-14 11:00"), ["T-002", "T-003"])
+            finally:
+                hub.TASKS = old
+
     def test_settings_in_sync(self):
         import json
         current = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
