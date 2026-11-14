@@ -12,5 +12,12 @@
     "auto_merge": false,
     "description": "가상 피팅·코디 보드 앱",
     "created": "2026-11-14 00:00"
+  },
+  "tiktocauto": {
+    "repo": "~/projects/tiktocauto",
+    "github": "kjd1374/tiktocauto",
+    "auto_merge": true,
+    "description": "뭔가 자동화해서 틱톡 조회수를 빨거나 뭐 인기 좀 얻어서 이걸로 돈을 벌고 싶은데??",
+    "created": "2026-11-14 23:58"
   }
 }
